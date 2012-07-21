@@ -1,3 +1,4 @@
+# -*- coding:utf-8 -*-
 import os
 import time
 import bisect
@@ -8,6 +9,7 @@ import logging
 default_data_dir = './data/'
 default_write_buffer_size = 1024*10
 default_read_buffer_size = 1024*10
+default_index_interval = 1000
 
 def ensure_data_dir():
     if not os.path.exists(default_data_dir):
@@ -18,9 +20,8 @@ def init():
 
 class WawaIndex:
     def __init__(self, index_name):
-        self.fp_index = open(os.path.join(default_data_dir, index_name + '.index'), 'a+')
-        self.indexes = []
-        self.offsets = [] 
+        self.fp_index = open(os.path.join(default_data_dir, index_name + '.index'), 'a+', 1)
+        self.indexes, self.offsets, self.index_count = [], [], 0
 
     def __update_index(self, key, offset):
         self.indexes.append(key)
@@ -29,23 +30,26 @@ class WawaIndex:
     def load_index(self):
         self.fp_index.seek(0)
         for line in self.fp_index:
-            key, offset  = line.split()
-            offset = int(offset)
-            self.__update_index(key, offset)
+            try:
+                key, offset  = line.split()
+                self.__update_index(key, offset)
+            except ValueError: # 索引如果没有flush的话，可能读到有半行的数据
+                pass
 
     def append_index(self, key, offset):
-        self.__update_index(key, offset)
-        index_data = '%s %s %s' % (key, offset, os.linesep)
-        self.fp_index.write(index_data)
+        self.index_count += 1
+        if self.index_count % default_index_interval == 0:
+            self.__update_index(key, offset)
+            self.fp_index.write('%s %s %s' % (key, offset, os.linesep))
 
     def get_offsets(self, begin_key, end_key):
-        index_len = len(self.indexes)
-        if index_len == 0 : return 0, 0
         left = bisect.bisect_left(self.indexes, str(begin_key))
         right = bisect.bisect_left(self.indexes, str(end_key))
+        left, right = left - 1, right - 1
+        if left < 0: left = 0
+        if right < 0: right = 0
+        if right > len(self.indexes) - 1: right = len(self.indexes) - 1 
         logging.debug('get_index_range:%s %s %s %s %s %s', self.indexes[0], self.indexes[-1], begin_key, end_key, left, right)
-        if left == index_len : left = 0
-        if right == index_len : right = 0 
         return self.offsets[left], self.offsets[right] 
 
 
@@ -53,18 +57,23 @@ class WawaDB:
     def __init__(self, db_name):
         self.db_name = db_name
         self.fp_data_for_append = open(os.path.join(default_data_dir, db_name + '.db'), 'a', default_write_buffer_size)
-        self.index1 = WawaIndex(db_name+'1')
-        self.index1.load_index()
+        self.index = WawaIndex(db_name)
+        self.index.load_index()
 
-    def __get_data_by_offsets(self, begin_offset, end_offset):
+    def __get_data_by_offsets(self, begin_key, end_key, begin_offset, end_offset):
         fp_data = open(os.path.join(default_data_dir, self.db_name + '.db'), 'r', default_read_buffer_size)
         fp_data.seek(int(begin_offset))
         
-        will_read_len, read_len = end_offset - begin_offset, 0
         line = fp_data.readline()
+        find_real_begin_offset = False
+        will_read_len, read_len = int(end_offset) - int(begin_offset), 0
         while line:
+            if (not find_real_begin_offset) and  (line < str(begin_key)): 
+                line = fp_data.readline()
+                continue
+            find_real_begin_offset = True
             read_len += len(line)
-            if read_len >= will_read_len:break
+            if (read_len >= will_read_len) and (line > str(end_key)): break
             yield line.rstrip('\r\n')
             line = fp_data.readline()
 
@@ -78,13 +87,12 @@ class WawaDB:
                 raise ValueError('data contains linesep') 
 
         check_args()
-
         
         record_time = time.mktime(record_time.timetuple()) 
         data = '%s %s %s' % (record_time, data, os.linesep)
         offset = self.fp_data_for_append.tell()
         self.fp_data_for_append.write(data)
-        self.index1.append_index(record_time, offset)
+        self.index.append_index(record_time, offset)
 
     def get_data(self, begin_time, end_time, data_filter=None):
         def check_args():
@@ -94,9 +102,9 @@ class WawaDB:
         check_args()
 
         begin_time, end_time = time.mktime(begin_time.timetuple()), time.mktime(end_time.timetuple()) 
-        begin_offset, end_offset = self.index1.get_offsets(begin_time, end_time)
+        begin_offset, end_offset = self.index.get_offsets(begin_time, end_time)
 
-        for data in self.__get_data_by_offsets(begin_offset, end_offset):
+        for data in self.__get_data_by_offsets(begin_time, end_time, begin_offset, end_offset):
             if data_filter:
                 if data_filter(data):
                     yield data
@@ -131,7 +139,7 @@ def test():
     @time_test('test_get_data')    
     def test_get_data(db):
         begin_time = datetime.now() - timedelta(hours=3) 
-        end_time = begin_time + timedelta(minutes=120)
+        end_time = begin_time + timedelta(minutes=100)
         results = list(db.get_data(begin_time, end_time, lambda x: x.find('1024') != -1))
         print 'test_get_data get %s results' % len(results)
 
@@ -142,6 +150,7 @@ def test():
     if not os.path.exists('./data/test.db'):
         db = get_db()
         gen_test_data(db)
+        #db.index.fp_index.flush()
   
     db = get_db() 
     test_get_data(db)
