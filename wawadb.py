@@ -22,12 +22,13 @@ class WawaIndex:
     def __init__(self, index_name):
         self.fp_index = open(os.path.join(default_data_dir, index_name + '.index'), 'a+', 1)
         self.indexes, self.offsets, self.index_count = [], [], 0
+        self.__load_index()
 
     def __update_index(self, key, offset):
         self.indexes.append(key)
         self.offsets.append(offset)
 
-    def load_index(self):
+    def __load_index(self):
         self.fp_index.seek(0)
         for line in self.fp_index:
             try:
@@ -58,7 +59,6 @@ class WawaDB:
         self.db_name = db_name
         self.fp_data_for_append = open(os.path.join(default_data_dir, db_name + '.db'), 'a', default_write_buffer_size)
         self.index = WawaIndex(db_name)
-        self.index.load_index()
 
     def __get_data_by_offsets(self, begin_key, end_key, begin_offset, end_offset):
         fp_data = open(os.path.join(default_data_dir, self.db_name + '.db'), 'r', default_read_buffer_size)
@@ -68,11 +68,11 @@ class WawaDB:
         find_real_begin_offset = False
         will_read_len, read_len = int(end_offset) - int(begin_offset), 0
         while line:
+            read_len += len(line)
             if (not find_real_begin_offset) and  (line < str(begin_key)): 
                 line = fp_data.readline()
                 continue
             find_real_begin_offset = True
-            read_len += len(line)
             if (read_len >= will_read_len) and (line > str(end_key)): break
             yield line.rstrip('\r\n')
             line = fp_data.readline()
@@ -139,7 +139,7 @@ def test():
     @time_test('test_get_data')    
     def test_get_data(db):
         begin_time = datetime.now() - timedelta(hours=3) 
-        end_time = begin_time + timedelta(minutes=100)
+        end_time = begin_time + timedelta(minutes=120)
         results = list(db.get_data(begin_time, end_time, lambda x: x.find('1024') != -1))
         print 'test_get_data get %s results' % len(results)
 
